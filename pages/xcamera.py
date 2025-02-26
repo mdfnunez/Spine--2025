@@ -9,7 +9,6 @@ import os
 cam = xiapi.Camera()
 
 try:
-    # Abrir la cámara
     cam.open_device()
 except xiapi.Xi_error as e:
     if str(e) == "ERROR 57: Resource (device) or function locked by mutex":
@@ -17,67 +16,69 @@ except xiapi.Xi_error as e:
     else:
         raise e
 
-# Disminuir la exposición
-cam.set_exposure(5000)  # Reducir a 10 ms
-
-# Crear una instancia de Image para almacenar los datos
+# Configuración inicial
+cam.set_exposure(10000)  # Reducir exposición
 img = xiapi.Image()
-
-# Iniciar la adquisición de datos
 cam.start_acquisition()
 
-# Obtener el timestamp del inicio de la grabación y crear una carpeta con ese nombre
-start_timestamp = time.strftime('%Y-%m-%d_%H h, %M min, %S seg')
-os.makedirs(start_timestamp, exist_ok=True)
+# Crear ventana de configuración interactiva
+cv2.namedWindow("Configuración", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("Configuración", 400, 300)
 
-# Configurar el tiempo de inicio para los archivos de frames
-start_time = time.time()
+# Crear barras deslizantes
+cv2.createTrackbar("Brillo", "Configuración", 50, 100, lambda x: None)
+cv2.createTrackbar("Contraste", "Configuración", 3, 10, lambda x: None)
+cv2.createTrackbar("Saturación", "Configuración", 50, 100, lambda x: None)
 
 while True:
-    # Capturar una imagen
+    # Capturar imagen
     cam.get_image(img)
     data_raw = img.get_image_data_raw()
-
-    # Convertir los datos crudos a un array de NumPy
     image_np = np.frombuffer(data_raw, dtype=np.uint8).reshape(img.height, img.width)
 
-    # Ahora vamos a dividir la imagen en 16 canales siguiendo un patrón mosaico
+    # Separar en 16 canales
     channels = np.zeros((img.height // 4, img.width // 4, 16), dtype=np.uint8)
-
-    # Reorganizar los píxeles en los 16 canales
     for y in range(4):
         for x in range(4):
-            # Extraer los sub-píxeles que corresponden a cada canal en el mosaico
             channels[:, :, y * 4 + x] = image_np[y::4, x::4]
 
-    # Crear una imagen en falso color combinando los canales 2, 8 y 15
+    # Seleccionar los canales para falso color RGB
     false_rgb = np.stack((channels[:, :, 11],  # Rojo
-                      channels[:, :, 7],   # Verde
-                      channels[:, :, 3]), axis=-1)  # Azul
+                          channels[:, :, 7],   # Verde
+                          channels[:, :, 3]), axis=-1).astype(np.float32)
 
-    # Redimensionar para visualización
-    false_rgb_resized = cv2.resize(false_rgb, (640, 360))
-    flipped_rgb = cv2.flip(false_rgb_resized, -1)  # -1 para voltear en ambas direcciones
+    # Obtener valores de los sliders
+    brillo = cv2.getTrackbarPos("Brillo", "Configuración") / 50  # Rango 0.5 - 2.0
+    contraste = cv2.getTrackbarPos("Contraste", "Configuración")  # Rango 1 - 10
+    saturacion = cv2.getTrackbarPos("Saturación", "Configuración") / 50  # Rango 0.5 - 2.0
 
-    # Mostrar la imagen RGB falsa
-    cv2.imshow('RGB Falso (Canales 2, 8, 15)', flipped_rgb)
+    # Normalizar cada canal (Brillo automático)
+    for i in range(3):
+        min_val, max_val = np.min(false_rgb[:, :, i]), np.max(false_rgb[:, :, i])
+        false_rgb[:, :, i] = 255 * (false_rgb[:, :, i] - min_val) / (max_val - min_val + 1e-6)
 
-    # Guardar cada segundo en un archivo TIFF
-    current_time = time.time()
-    if current_time - start_time >= 1:
-        frame_timestamp = time.strftime('%H h, %M min, %S seg')
-        tiff_filename = f'{start_timestamp}/frame_{frame_timestamp}.tiff'
-        Image.fromarray(false_rgb).save(tiff_filename, compression="tiff_deflate")
-        start_time = current_time
+    # Aplicar ajuste de contraste con CLAHE
+    clahe = cv2.createCLAHE(clipLimit=contraste, tileGridSize=(8, 8))
+    for i in range(3):
+        false_rgb[:, :, i] = clahe.apply(false_rgb[:, :, i].astype(np.uint8))
 
-    # Esperar 1 ms y capturar la tecla presionada
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):  # Salir si se presiona 'q'
+    # Convertir a uint8 y ajustar brillo
+    false_rgb = np.clip(false_rgb * brillo, 0, 255).astype(np.uint8)
+
+    # Convertir a HSV y ajustar saturación
+    false_rgb_hsv = cv2.cvtColor(false_rgb, cv2.COLOR_RGB2HSV)
+    false_rgb_hsv[:, :, 1] = np.clip(false_rgb_hsv[:, :, 1] * saturacion, 0, 255)
+    false_rgb = cv2.cvtColor(false_rgb_hsv, cv2.COLOR_HSV2RGB)
+
+    # Redimensionar imagen y mostrar
+    false_rgb_resized = cv2.resize(false_rgb, (1280, 720))
+    cv2.imshow("RGB Falso (Canales 11, 7, 3)", false_rgb_resized)
+
+    # Salir con 'q'
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Detener la adquisición de datos y cerrar la cámara
+# Detener adquisición y cerrar cámara
 cam.stop_acquisition()
 cam.close_device()
-
-# Cerrar todas las ventanas
 cv2.destroyAllWindows()
