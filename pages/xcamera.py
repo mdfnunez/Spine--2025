@@ -8,11 +8,17 @@ import os
 # Crear una instancia para la primera cámara conectada
 cam = xiapi.Camera()
 
-# Abrir la cámara
-cam.open_device()
+try:
+    # Abrir la cámara
+    cam.open_device()
+except xiapi.Xi_error as e:
+    if str(e) == "ERROR 57: Resource (device) or function locked by mutex":
+        print("La cámara ya está abierta. Continuando...")
+    else:
+        raise e
 
-# Ajustar la exposición
-cam.set_exposure(50000)
+# Disminuir la exposición
+cam.set_exposure(5000)  # Reducir a 10 ms
 
 # Crear una instancia de Image para almacenar los datos
 img = xiapi.Image()
@@ -44,35 +50,25 @@ while True:
             # Extraer los sub-píxeles que corresponden a cada canal en el mosaico
             channels[:, :, y * 4 + x] = image_np[y::4, x::4]
 
-    # Añadir los 16 canales como páginas separadas en un archivo multitiff
-    frames = []
-    for i in range(16):
-        # Convertir cada canal a formato PIL Image
-        pil_image = Image.fromarray(channels[:, :, i])
-        # Agregar a la lista de frames
-        frames.append(pil_image)
+    # Crear una imagen en falso color combinando los canales 2, 8 y 15
+    false_rgb = np.stack((channels[:, :, 11],  # Rojo
+                      channels[:, :, 7],   # Verde
+                      channels[:, :, 3]), axis=-1)  # Azul
 
-    # Guardar las imágenes en un archivo multitiff cada segundo
+    # Redimensionar para visualización
+    false_rgb_resized = cv2.resize(false_rgb, (640, 360))
+    flipped_rgb = cv2.flip(false_rgb_resized, -1)  # -1 para voltear en ambas direcciones
+
+    # Mostrar la imagen RGB falsa
+    cv2.imshow('RGB Falso (Canales 2, 8, 15)', flipped_rgb)
+
+    # Guardar cada segundo en un archivo TIFF
     current_time = time.time()
     if current_time - start_time >= 1:
-        # Obtener el timestamp actual para el nombre del archivo
         frame_timestamp = time.strftime('%H h, %M min, %S seg')
-
-        # Generar un nombre de archivo con timestamp
         tiff_filename = f'{start_timestamp}/frame_{frame_timestamp}.tiff'
-
-        # Guardar los 16 canales en un archivo multitiff
-        frames[0].save(tiff_filename, save_all=True, append_images=frames[1:], compression="tiff_deflate")
-
-        # Resetear el tiempo
+        Image.fromarray(false_rgb).save(tiff_filename, compression="tiff_deflate")
         start_time = current_time
-
-    # Mostrar la imagen del primer canal como referencia
-    image_resized = cv2.resize(channels[:, :, 0], (640, 360))  # Mostrar solo el primer canal
-    flipped_image = cv2.flip(image_resized, -1)  # -1 para voltear en ambas direcciones
-
-    # Mostrar la imagen invertida en la misma ventana OpenCV
-    cv2.imshow('Video continuo - Canal 1', flipped_image)
 
     # Esperar 1 ms y capturar la tecla presionada
     key = cv2.waitKey(1) & 0xFF

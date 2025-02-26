@@ -1,137 +1,218 @@
 import os
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog
 import tifffile as tiff
 import numpy as np
 import matplotlib.pyplot as plt
-import tkinter as tk
-from tkinter import filedialog, messagebox
 
-# Diccionarios para almacenar rutas y datos
-rutas = {"basal": None, "compresion": None, "post": None, "blanco": None, "negro": None}
-imagenes = {"basal": None, "compresion": None, "post": None, "blanco": None, "negro": None}
+# Extensiones permitidas para imágenes
+EXT_PERMITIDAS = (".tif", ".tiff")
 
-# Función para seleccionar archivos (permite ver todos, pero solo carga TIFF)
-def seleccionar_archivo(tipo):
-    archivo = filedialog.askopenfilename(title=f"Selecciona la imagen {tipo}",
-                                         filetypes=[("Todos los archivos", "*.*"), ("TIFF Files", "*.tif;*.tiff")])
-    if archivo:
-        try:
-            imagen_test = tiff.imread(archivo)  # Intentar leer el archivo para verificar que es válido
-            rutas[tipo] = archivo
-            etiquetas[tipo].config(text=f"{tipo.capitalize()}: {archivo.split('/')[-1]}")
-            print(f"✅ {tipo.capitalize()} seleccionado: {archivo}")
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo cargar el archivo {archivo}. No es un TIFF válido.\n{str(e)}")
+def seleccionar_archivo(titulo, filetypes=[("Imágenes", EXT_PERMITIDAS), ("Todos", "*.*")]):
+    root = tk.Tk()
+    root.withdraw()
+    path = filedialog.askopenfilename(title=titulo, filetypes=filetypes)
+    root.destroy()
+    return path
 
-# Función para cargar imágenes MultiTIFF
-def cargar_imagenes():
-    global imagenes
-    for tipo in rutas.keys():
-        if rutas[tipo]:
-            try:
-                imagenes[tipo] = tiff.imread(rutas[tipo])
-                print(f"✅ {tipo.capitalize()} cargado: {imagenes[tipo].shape}")
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo cargar {tipo}: {str(e)}")
-                return
-    etiqueta_info.config(text="Imágenes cargadas correctamente.")
+def seleccionar_carpeta(titulo="Selecciona la carpeta con imágenes multispectrales"):
+    root = tk.Tk()
+    root.withdraw()
+    carpeta = filedialog.askdirectory(title=titulo)
+    root.destroy()
+    return carpeta
 
-# Función para calcular reflectancia normalizada
-def calcular_reflectancia(muestra, blanco, negro):
-    blanco = np.maximum(blanco, negro + 1e-6)  # Evitar divisiones por 0
-    reflectancia = (muestra - negro) / (blanco - negro)
-    reflectancia = np.clip(reflectancia, 0, 1)  # Limitar valores entre 0 y 1
-    return reflectancia
+def seleccionar_canal(titulo, canal_por_defecto):
+    root = tk.Tk()
+    root.withdraw()
+    canal = simpledialog.askinteger(titulo, f"Introduce el número del canal (0-15):", initialvalue=canal_por_defecto)
+    root.destroy()
+    return canal
 
-# Función para visualizar mapas de diferencias con la basal como referencia y una máscara
-def visualizar_diferencias():
-    if any(imagenes[tipo] is None for tipo in ["basal", "compresion", "post", "blanco", "negro"]):
-        messagebox.showwarning("Advertencia", "Primero debes cargar todas las imágenes.")
+def ajustar_formato_imagen(imagen):
+    """
+    Si la imagen viene en formato channels-first (16 x H x W),
+    la transpone para tener los canales en la última dimensión (H x W x 16).
+    """
+    if imagen.ndim == 3:
+        if imagen.shape[0] == 16 and imagen.shape[2] != 16:
+            imagen = np.transpose(imagen, (1, 2, 0))
+    return imagen
+
+def process_image(ruta, ref_vals_iso, ref_vals_hem, canal_isos, canal_hem, epsilon=1e-6):
+    """
+    Procesa la imagen en 'ruta' y calcula el índice de hemoglobina oxigenada.
+    Se utiliza:
+      reflectancia = (imagen - ref_negro) / (ref_blanco - ref_negro + epsilon)
+      OD = -ln(reflectancia)
+      Índice = OD_hem - OD_iso
+    Retorna:
+      - oxygenation_index: matriz con el índice (valores numéricos originales, en escala de grises).
+      - canal_imagen_iso: imagen del canal isosbástico (para usar como fondo).
+    """
+    try:
+        img = tiff.imread(ruta)
+    except Exception as e:
+        print(f"Error al cargar {ruta}: {e}")
+        return None, None
+
+    img = ajustar_formato_imagen(img)
+    if img.ndim != 3 or img.shape[2] < 16:
+        print(f"La imagen {ruta} no tiene 16 canales; se omite.")
+        return None, None
+
+    # Extraer los canales de interés
+    canal_imagen_iso = img[:, :, canal_isos].astype(np.float64)
+    canal_imagen_hem = img[:, :, canal_hem].astype(np.float64)
+
+    # Calcular reflectancias usando valores de referencia (percentiles)
+    reflectancia_iso = (canal_imagen_iso - ref_vals_iso[1]) / (ref_vals_iso[0] - ref_vals_iso[1] + epsilon)
+    reflectancia_hem = (canal_imagen_hem - ref_vals_hem[1]) / (ref_vals_hem[0] - ref_vals_hem[1] + epsilon)
+    reflectancia_iso = np.clip(reflectancia_iso, epsilon, 1)
+    reflectancia_hem = np.clip(reflectancia_hem, epsilon, 1)
+
+    # Calcular densidad óptica (OD)
+    OD_iso = -np.log(reflectancia_iso)
+    OD_hem = -np.log(reflectancia_hem)
+
+    # Índice de hemoglobina oxigenada: diferencia de OD
+    oxygenation_index = OD_hem - OD_iso
+
+    return oxygenation_index, canal_imagen_iso
+
+def main():
+    epsilon = 1e-6
+
+    # Seleccionar imágenes de referencia (blanca y negra)
+    path_blanco = seleccionar_archivo("Selecciona la imagen de referencia BLANCA")
+    if not path_blanco:
+        messagebox.showerror("Error", "No se seleccionó la imagen de referencia blanca.")
+        return
+
+    path_negro = seleccionar_archivo("Selecciona la imagen de referencia NEGRA")
+    if not path_negro:
+        messagebox.showerror("Error", "No se seleccionó la imagen de referencia negra.")
         return
 
     try:
-        banda = int(entry_banda.get())
-
-        # Aplicar corrección de reflectancia
-        reflectancia_basal = calcular_reflectancia(imagenes["basal"], imagenes["blanco"], imagenes["negro"])
-        reflectancia_compresion = calcular_reflectancia(imagenes["compresion"], imagenes["blanco"], imagenes["negro"])
-        reflectancia_post = calcular_reflectancia(imagenes["post"], imagenes["blanco"], imagenes["negro"])
-
-        # Calcular diferencias con la basal como referencia
-        diferencia_basal_compresion = reflectancia_compresion - reflectancia_basal
-        diferencia_basal_post = reflectancia_post - reflectancia_basal
-
-        # Crear una máscara de la imagen basal (resaltamos las zonas con valores altos)
-        mascara = np.where(reflectancia_basal[banda] > np.percentile(reflectancia_basal[banda], 80), 1, 0)
-
-        # Ajustar la escala de color si las diferencias son muy pequeñas
-        vmin_dif = np.min([diferencia_basal_compresion[banda], diferencia_basal_post[banda]])
-        vmax_dif = np.max([diferencia_basal_compresion[banda], diferencia_basal_post[banda]])
-
-        if np.abs(vmin_dif) < 0.1 and np.abs(vmax_dif) < 0.1:
-            vmin_dif, vmax_dif = -0.1, 0.1  # Ajustar escala para hacer los cambios más visibles
-
-        # Graficar las imágenes
-        fig, axes = plt.subplots(1, 4, figsize=(20, 5))
-
-        # Imagen original con la máscara de la basal
-        axes[0].imshow(imagenes["basal"][banda], cmap='gray')
-        axes[0].imshow(mascara, cmap='jet', alpha=0.5)  # Superponer máscara en azul-rojo
-        axes[0].set_title(f'Original con Máscara Basal - Banda {banda}')
-        axes[0].axis("off")
-
-        # Imagen basal en escala de grises
-        axes[1].imshow(reflectancia_basal[banda], cmap='gray', vmin=0, vmax=1)
-        axes[1].set_title(f'Basal - Banda {banda}')
-        axes[1].axis("off")
-
-        # Diferencia entre Basal y Compresión
-        im1 = axes[2].imshow(diferencia_basal_compresion[banda], cmap='bwr', vmin=vmin_dif, vmax=vmax_dif)
-        axes[2].set_title('Cambio: Basal → Compresión')
-        plt.colorbar(im1, ax=axes[2])
-        axes[2].axis("off")
-
-        # Diferencia entre Basal y Post-Compresión
-        im2 = axes[3].imshow(diferencia_basal_post[banda], cmap='bwr', vmin=vmin_dif, vmax=vmax_dif)
-        axes[3].set_title('Cambio: Basal → Post-Compresión')
-        plt.colorbar(im2, ax=axes[3])
-        axes[3].axis("off")
-
-        plt.show()
-
+        img_blanco = tiff.imread(path_blanco)
+        img_negro  = tiff.imread(path_negro)
     except Exception as e:
-        messagebox.showerror("Error", f"No se pudo visualizar la banda: {str(e)}")
+        messagebox.showerror("Error", f"Error al cargar las imágenes de referencia:\n{e}")
+        return
 
-# Crear interfaz gráfica
-root = tk.Tk()
-root.title("Cargar imágenes MultiTIFF y calcular reflectancia")
+    # Ajustar formato a channels-last
+    img_blanco = ajustar_formato_imagen(img_blanco)
+    img_negro  = ajustar_formato_imagen(img_negro)
+    for img, nombre in zip([img_blanco, img_negro], ["blanca", "negra"]):
+        if img.ndim != 3 or img.shape[2] < 16:
+            messagebox.showerror("Error", f"La imagen de referencia {nombre} debe tener 16 canales.")
+            return
 
-# Etiquetas y botones para selección de archivos
-etiquetas = {}
-for tipo in rutas.keys():
-    frame = tk.Frame(root)
-    frame.pack(pady=5)
-    etiquetas[tipo] = tk.Label(frame, text=f"{tipo.capitalize()}: No seleccionado")
-    etiquetas[tipo].pack(side=tk.LEFT)
-    btn = tk.Button(frame, text="Seleccionar", command=lambda t=tipo: seleccionar_archivo(t))
-    btn.pack(side=tk.RIGHT)
+    # Seleccionar canales a utilizar (por defecto: 6 para isosbástico y 5 para hemoglobina)
+    canal_isos = seleccionar_canal("Canal Isosbástico", 6)
+    if canal_isos is None or not (0 <= canal_isos < 16):
+        messagebox.showerror("Error", "Canal isosbástico no válido.")
+        return
 
-# Botón para cargar imágenes
-btn_cargar = tk.Button(root, text="Cargar Imágenes", command=cargar_imagenes)
-btn_cargar.pack(pady=5)
+    canal_hem = seleccionar_canal("Canal Hemoglobina", 5)
+    if canal_hem is None or not (0 <= canal_hem < 16):
+        messagebox.showerror("Error", "Canal de hemoglobina no válido.")
+        return
 
-# Etiqueta de información de imágenes cargadas
-etiqueta_info = tk.Label(root, text="Esperando carga de imágenes...")
-etiqueta_info.pack(pady=5)
+    # Calcular valores de referencia usando percentiles
+    ref_blanco_iso = np.percentile(img_blanco[:, :, canal_isos], 99)
+    ref_negro_iso  = np.percentile(img_negro[:, :, canal_isos], 1)
+    ref_vals_iso = (ref_blanco_iso, ref_negro_iso)
 
-# Entrada y botón para visualizar mapas de diferencias
-frame_banda = tk.Frame(root)
-frame_banda.pack(pady=5)
-tk.Label(frame_banda, text="Banda a visualizar:").pack(side=tk.LEFT)
-entry_banda = tk.Entry(frame_banda, width=5)
-entry_banda.pack(side=tk.LEFT)
-entry_banda.insert(0, "5")  # Banda por defecto
-btn_ver = tk.Button(frame_banda, text="Ver Diferencias", command=visualizar_diferencias)
-btn_ver.pack(side=tk.LEFT)
+    ref_blanco_hem = np.percentile(img_blanco[:, :, canal_hem], 99)
+    ref_negro_hem  = np.percentile(img_negro[:, :, canal_hem], 1)
+    ref_vals_hem = (ref_blanco_hem, ref_negro_hem)
 
-# Iniciar GUI
-root.mainloop()
+    print("Referencias Isosbástico: Blanco = {:.2f}, Negro = {:.2f}".format(ref_blanco_iso, ref_negro_iso))
+    print("Referencias Hemoglobina: Blanco = {:.2f}, Negro = {:.2f}".format(ref_blanco_hem, ref_negro_hem))
+
+    # Seleccionar carpeta con imágenes de muestra
+    carpeta = seleccionar_carpeta("Selecciona la carpeta con imágenes multispectrales")
+    if not carpeta:
+        messagebox.showerror("Error", "No se seleccionó ninguna carpeta.")
+        return
+
+    rutas = [os.path.join(carpeta, f) for f in os.listdir(carpeta) if f.lower().endswith(EXT_PERMITIDAS)]
+    if not rutas:
+        messagebox.showerror("Error", "No se encontraron imágenes TIFF en la carpeta seleccionada.")
+        return
+
+    # Crear carpeta principal para guardar resultados
+    carpeta_guardado = os.path.join(carpeta, "procesadas")
+    os.makedirs(carpeta_guardado, exist_ok=True)
+    # Crear subcarpetas para cada tipo de imagen
+    carpeta_indice = os.path.join(carpeta_guardado, "Indice")
+    carpeta_oxigenada = os.path.join(carpeta_guardado, "Oxigenada")
+    carpeta_nonoxigenada = os.path.join(carpeta_guardado, "NoOxigenada")
+    carpeta_visualizacion = os.path.join(carpeta_guardado, "Visualizacion")
+    carpeta_fondo = os.path.join(carpeta_guardado, "Fondo")
+    for folder in [carpeta_indice, carpeta_oxigenada, carpeta_nonoxigenada, carpeta_visualizacion, carpeta_fondo]:
+        os.makedirs(folder, exist_ok=True)
+
+    # Definir umbral para segmentar sangre oxigenada y no oxigenada
+    threshold = 0.8
+
+    for ruta in rutas:
+        print(f"Procesando {ruta} ...")
+        oxygenation_index, canal_imagen_iso = process_image(ruta, ref_vals_iso, ref_vals_hem, canal_isos, canal_hem, epsilon)
+        if oxygenation_index is None:
+            continue
+
+        base_name = os.path.splitext(os.path.basename(ruta))[0]
+
+        # Guardar el índice (escala de grises) en la carpeta "Indice" para mediciones ROI
+        salida_index_tiff = os.path.join(carpeta_indice, f"{base_name}_ox_index.tif")
+        tiff.imwrite(salida_index_tiff, oxygenation_index.astype(np.float32))
+        print("Guardado índice en escala de grises en:", salida_index_tiff)
+
+        # Guardar la imagen de fondo (canal isosbástico) en la carpeta "Fondo"
+        salida_fondo_tiff = os.path.join(carpeta_fondo, f"{base_name}_fondo.tif")
+        tiff.imwrite(salida_fondo_tiff, canal_imagen_iso.astype(np.float32))
+        print("Guardado fondo en:", salida_fondo_tiff)
+
+        # Crear imágenes segmentadas según el umbral
+        ox_only = oxygenation_index.copy()
+        ox_only[ox_only <= threshold] = 0
+
+        nonox_only = oxygenation_index.copy()
+        nonox_only[nonox_only > threshold] = 0
+
+        salida_ox_tiff = os.path.join(carpeta_oxigenada, f"{base_name}_ox.tif")
+        salida_nonox_tiff = os.path.join(carpeta_nonoxigenada, f"{base_name}_nonox.tif")
+        tiff.imwrite(salida_ox_tiff, ox_only.astype(np.float32))
+        tiff.imwrite(salida_nonox_tiff, nonox_only.astype(np.float32))
+        print("Guardadas imágenes segmentadas en Oxigenada y NoOxigenada.")
+
+        # Generar visualización: superponer el índice (falso color) sobre el fondo isosbástico atenuado
+        fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+        axs[0].imshow(canal_imagen_iso, cmap='gray')
+        im0 = axs[0].imshow(oxygenation_index, cmap='jet', alpha=0.5)
+        axs[0].set_title("Índice de Hemoglobina Oxigenada\n(con fondo isosbástico)")
+        fig.colorbar(im0, ax=axs[0])
+        
+        axs[1].imshow(canal_imagen_iso, cmap='gray')
+        im1 = axs[1].imshow(ox_only, cmap='jet', alpha=0.5)
+        axs[1].set_title("Sangre Oxigenada (> {:.1f})".format(threshold))
+        fig.colorbar(im1, ax=axs[1])
+        
+        axs[2].imshow(canal_imagen_iso, cmap='gray')
+        im2 = axs[2].imshow(nonox_only, cmap='jet', alpha=0.5)
+        axs[2].set_title("Sangre No Oxigenada (<= {:.1f})".format(threshold))
+        fig.colorbar(im2, ax=axs[2])
+        
+        plt.tight_layout()
+        salida_png = os.path.join(carpeta_visualizacion, f"{base_name}_visualizacion.png")
+        fig.savefig(salida_png, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        print("Guardada visualización en:", salida_png)
+
+    messagebox.showinfo("Finalizado", "Se completó el procesamiento de las imágenes.")
+
+if __name__ == '__main__':
+    main()
