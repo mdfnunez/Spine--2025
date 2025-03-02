@@ -43,8 +43,27 @@ img = xiapi.Image()
 cam.start_acquisition()
 
 # 📌 Definir frecuencia de guardado en segundos
-guardar_cada =2  # Antes era 1s, ahora cada 0.2s para más fluidez
+guardar_cada = 2  # Antes era 1s, ahora cada 2s
 start_time = time.time()
+
+# 📌 Crear ventana de ajuste
+cv2.namedWindow("Ajustes")
+
+# 📌 Función para ajustar el gamma
+def adjust_gamma(image, gamma=1.0):
+    invGamma = 1.0 / gamma
+    table = np.array([(i / 255.0) ** invGamma * 255 for i in np.arange(0, 256)]).astype("uint8")
+    return cv2.LUT(image, table)
+
+# 📌 Función para cambiar el tono (Hue)
+def adjust_hue(image, hue_shift):
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hsv[:, :, 0] = (hsv[:, :, 0] + hue_shift) % 180  # Hue se ajusta en un rango de 0-179
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+# 📌 Trackbars para ajustar gamma y hue
+cv2.createTrackbar("Gamma", "Ajustes", 10, 50, lambda x: None)  # Rango 0.1 - 5.0
+cv2.createTrackbar("Hue", "Ajustes", 0, 180, lambda x: None)  # Hue shift entre 0 y 180
 
 while True:
     # 📌 Capturar imagen de la cámara
@@ -67,9 +86,17 @@ while True:
     false_rgb = 255 * (false_rgb - np.min(false_rgb)) / (np.max(false_rgb) - np.min(false_rgb))
     false_rgb = false_rgb.astype(np.uint8)
 
+    # 📌 Obtener valores actuales de gamma y hue
+    gamma_value = cv2.getTrackbarPos("Gamma", "Ajustes") / 5.0  # Convertir a 0.1 - 5.0
+    hue_shift = cv2.getTrackbarPos("Hue", "Ajustes")
+
+    # 📌 Aplicar ajustes
+    false_rgb = adjust_gamma(false_rgb, gamma_value)
+    false_rgb = adjust_hue(false_rgb, hue_shift)
+
     # 📌 Redimensionar para aumentar velocidad de visualización
-    false_rgb_resized = cv2.resize(false_rgb, (1600, 1200))  # Resolución más baja para mayor rapidez
-    cv2.imshow('RGB Falso (Canales 11, 7, 2)', false_rgb_resized)
+    false_rgb_resized = cv2.resize(false_rgb, (1800, 850))
+    cv2.imshow('RGB Falso (Canales 11, 7, 3)', false_rgb_resized)
 
     # 📌 Guardar imágenes más frecuentemente
     current_time = time.time()
